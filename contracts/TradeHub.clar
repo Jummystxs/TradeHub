@@ -1,6 +1,6 @@
 ;; TradeHub - Wholesale and Retail Distribution Management System
 ;; A comprehensive contract for managing wholesale/retail operations with supplier networks
-;; SECURITY-HARDENED VERSION
+;; SECURITY-HARDENED VERSION WITH MULTI-CURRENCY SUPPORT
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -19,6 +19,14 @@
 (define-constant err-invalid-string (err u112))
 (define-constant err-contract-paused (err u113))
 (define-constant err-invalid-principal (err u114))
+(define-constant err-invalid-currency (err u115))
+(define-constant err-currency-not-supported (err u116))
+(define-constant err-payment-failed (err u117))
+
+;; Currency Constants
+(define-constant currency-stx "STX")
+(define-constant currency-usdc "USDC")
+(define-constant currency-usdt "USDT")
 
 ;; Security Constants
 (define-constant max-string-length u100)
@@ -33,6 +41,9 @@
 (define-data-var order-counter uint u0)
 (define-data-var total-revenue uint u0)
 
+;; Currency Support Variables
+(define-data-var supported-currencies (list 10 (string-ascii 10)) (list "STX" "USDC" "USDT"))
+
 ;; Data Maps
 (define-map suppliers
   principal
@@ -42,7 +53,9 @@
     status: (string-ascii 20),
     rating: uint,
     products-count: uint,
-    joined-at: uint
+    joined-at: uint,
+    preferred-currency: (string-ascii 10),
+    accepted-currencies: (list 10 (string-ascii 10))
   }
 )
 
@@ -57,7 +70,8 @@
     minimum-order: uint,
     category: (string-ascii 50),
     status: (string-ascii 20),
-    created-at: uint
+    created-at: uint,
+    currency: (string-ascii 10)
   }
 )
 
@@ -70,7 +84,8 @@
     total-orders: uint,
     total-spent: uint,
     status: (string-ascii 20),
-    joined-at: uint
+    joined-at: uint,
+    preferred-currency: (string-ascii 10)
   }
 )
 
@@ -84,11 +99,19 @@
     total-price: uint,
     status: (string-ascii 20),
     created-at: uint,
-    updated-at: uint
+    updated-at: uint,
+    currency: (string-ascii 10),
+    payment-status: (string-ascii 20)
   }
 )
 
 (define-map supplier-product-count principal uint)
+
+;; Currency exchange rates (simplified - in production would integrate with oracle)
+(define-map currency-rates (string-ascii 10) uint) ;; Rate relative to STX (multiplied by 1000000 for precision)
+
+;; Currency balances for escrow
+(define-map escrow-balances {user: principal, currency: (string-ascii 10)} uint)
 
 ;; Read-only functions
 (define-read-only (get-supplier (supplier principal))
@@ -117,7 +140,8 @@
   {
     total-orders: (var-get order-counter),
     total-revenue: (var-get total-revenue),
-    is-active: (var-get contract-active)
+    is-active: (var-get contract-active),
+    supported-currencies: (var-get supported-currencies)
   }
 )
 
@@ -130,6 +154,30 @@
 
 (define-read-only (get-supplier-product-count (supplier principal))
   (default-to u0 (map-get? supplier-product-count supplier))
+)
+
+(define-read-only (get-supported-currencies)
+  (var-get supported-currencies)
+)
+
+(define-read-only (get-currency-rate (currency (string-ascii 10)))
+  (default-to u1000000 (map-get? currency-rates currency))
+)
+
+(define-read-only (get-escrow-balance (user principal) (currency (string-ascii 10)))
+  (default-to u0 (map-get? escrow-balances {user: user, currency: currency}))
+)
+
+(define-read-only (convert-currency (amount uint) (from-currency (string-ascii 10)) (to-currency (string-ascii 10)))
+  (if (is-eq from-currency to-currency)
+    amount
+    (let (
+      (from-rate (get-currency-rate from-currency))
+      (to-rate (get-currency-rate to-currency))
+    )
+      (/ (* amount from-rate) to-rate)
+    )
+  )
 )
 
 ;; SECURITY: Enhanced validation functions
@@ -153,6 +201,14 @@
   (or (is-eq status "pending") (or (is-eq status "confirmed") (or (is-eq status "shipped") (is-eq status "delivered"))))
 )
 
+(define-private (is-valid-payment-status (status (string-ascii 20)))
+  (or (is-eq status "pending") (or (is-eq status "paid") (or (is-eq status "failed") (is-eq status "refunded"))))
+)
+
+(define-private (is-supported-currency (currency (string-ascii 10)))
+  (is-some (index-of (var-get supported-currencies) currency))
+)
+
 ;; SECURITY: Enhanced string validation
 (define-private (is-valid-string (str (string-ascii 100)))
   (and (> (len str) u0) (<= (len str) max-string-length))
@@ -160,6 +216,10 @@
 
 (define-private (is-valid-description (desc (string-ascii 500)))
   (and (>= (len desc) u0) (<= (len desc) max-description-length))
+)
+
+(define-private (is-valid-currency-string (currency (string-ascii 10)))
+  (and (> (len currency) u0) (<= (len currency) u10))
 )
 
 ;; SECURITY: Enhanced numeric validation
@@ -182,10 +242,6 @@
 
 (define-private (is-valid-order-id (order-id uint))
   (and (> order-id u0) (<= order-id u1000000))
-)
-
-(define-private (is-valid-item-id (item-id uint))
-  (and (> item-id u0) (<= item-id u1000000))
 )
 
 ;; SECURITY: Principal validation
@@ -241,8 +297,22 @@
   )
 )
 
+;; Currency management functions
+(define-private (validate-currency-list (currencies (list 10 (string-ascii 10))))
+  (fold check-currency-validity currencies true)
+)
+
+(define-private (check-currency-validity (currency (string-ascii 10)) (acc bool))
+  (and acc (is-supported-currency currency))
+)
+
 ;; SECURITY: Enhanced public functions with comprehensive validation
-(define-public (register-supplier (name (string-ascii 50)) (contact (string-ascii 100)))
+(define-public (register-supplier 
+  (name (string-ascii 50)) 
+  (contact (string-ascii 100))
+  (preferred-currency (string-ascii 10))
+  (accepted-currencies (list 10 (string-ascii 10)))
+)
   (let (
     (current-block stacks-block-height)
   )
@@ -252,6 +322,8 @@
     (asserts! (> (len contact) u0) err-invalid-string)
     (asserts! (<= (len contact) u100) err-invalid-string)
     (asserts! (is-none (map-get? suppliers tx-sender)) err-already-exists)
+    (asserts! (is-supported-currency preferred-currency) err-currency-not-supported)
+    (asserts! (validate-currency-list accepted-currencies) err-currency-not-supported)
     
     (map-set suppliers tx-sender {
       name: name,
@@ -259,13 +331,19 @@
       status: "active",
       rating: u5,
       products-count: u0,
-      joined-at: current-block
+      joined-at: current-block,
+      preferred-currency: preferred-currency,
+      accepted-currencies: accepted-currencies
     })
     (ok true)
   )
 )
 
-(define-public (register-retailer (name (string-ascii 50)) (tier (string-ascii 20)))
+(define-public (register-retailer 
+  (name (string-ascii 50)) 
+  (tier (string-ascii 20))
+  (preferred-currency (string-ascii 10))
+)
   (let (
     (current-block stacks-block-height)
   )
@@ -274,6 +352,7 @@
     (asserts! (<= (len name) u50) err-invalid-string)
     (asserts! (is-valid-tier tier) err-invalid-tier)
     (asserts! (is-none (map-get? retailers tx-sender)) err-already-exists)
+    (asserts! (is-supported-currency preferred-currency) err-currency-not-supported)
     
     (let (
       (discount-rate (if (is-eq tier "bronze") u5 
@@ -287,7 +366,8 @@
         total-orders: u0,
         total-spent: u0,
         status: "active",
-        joined-at: current-block
+        joined-at: current-block,
+        preferred-currency: preferred-currency
       })
       (ok true)
     )
@@ -302,6 +382,7 @@
   (quantity uint) 
   (minimum-order uint) 
   (category (string-ascii 50))
+  (currency (string-ascii 10))
 )
   (let (
     (current-block stacks-block-height)
@@ -322,6 +403,7 @@
     (asserts! (is-valid-quantity quantity) err-invalid-amount)
     (asserts! (is-valid-quantity minimum-order) err-invalid-amount)
     (asserts! (<= minimum-order quantity) err-invalid-amount)
+    (asserts! (is-supported-currency currency) err-currency-not-supported)
     
     (map-set products {supplier: tx-sender, product-id: new-product-id} {
       name: name,
@@ -332,7 +414,8 @@
       minimum-order: minimum-order,
       category: category,
       status: "active",
-      created-at: current-block
+      created-at: current-block,
+      currency: currency
     })
     (map-set supplier-product-count tx-sender new-product-id)
     (map-set suppliers tx-sender
@@ -344,16 +427,25 @@
   )
 )
 
-(define-public (place-order (supplier principal) (product-id uint) (quantity uint))
+(define-public (place-order 
+  (supplier principal) 
+  (product-id uint) 
+  (quantity uint)
+  (payment-currency (string-ascii 10))
+)
   (let (
     (current-block stacks-block-height)
     (retailer-data (unwrap! (map-get? retailers tx-sender) err-not-found))
     (product-data (unwrap! (map-get? products {supplier: supplier, product-id: product-id}) err-not-found))
     (current-order-id (+ (var-get order-counter) u1))
     (wholesale-price (get wholesale-price product-data))
+    (product-currency (get currency product-data))
     (base-price (* wholesale-price quantity))
     (discount-rate (get discount-rate retailer-data))
-    (final-price (calculate-discounted-price base-price discount-rate))
+    (discounted-price (calculate-discounted-price base-price discount-rate))
+    (final-price (if (is-eq product-currency payment-currency)
+                   discounted-price
+                   (convert-currency discounted-price product-currency payment-currency)))
     (available-quantity (get quantity product-data))
   )
     (asserts! (is-contract-active) err-contract-paused)
@@ -362,6 +454,7 @@
     (asserts! (is-valid-quantity quantity) err-invalid-amount)
     (asserts! (can-place-order tx-sender supplier product-id quantity) err-minimum-order)
     (asserts! (< base-price max-price) err-invalid-price)
+    (asserts! (is-supported-currency payment-currency) err-currency-not-supported)
     
     (map-set orders current-order-id {
       retailer: tx-sender,
@@ -371,7 +464,9 @@
       total-price: final-price,
       status: "pending",
       created-at: current-block,
-      updated-at: current-block
+      updated-at: current-block,
+      currency: payment-currency,
+      payment-status: "pending"
     })
     
     (map-set products {supplier: supplier, product-id: product-id}
@@ -413,6 +508,55 @@
         updated-at: current-block
       })
     )
+    (ok true)
+  )
+)
+
+(define-public (update-payment-status (order-id uint) (new-payment-status (string-ascii 20)))
+  (let (
+    (current-block stacks-block-height)
+    (order-data (unwrap! (map-get? orders order-id) err-not-found))
+    (order-supplier (get supplier order-data))
+    (current-payment-status (get payment-status order-data))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-valid-order-id order-id) err-not-found)
+    (asserts! (is-eq tx-sender order-supplier) err-unauthorized)
+    (asserts! (is-valid-payment-status new-payment-status) err-invalid-status)
+    (asserts! (not (is-eq current-payment-status new-payment-status)) err-invalid-status)
+    
+    (map-set orders order-id
+      (merge order-data {
+        payment-status: new-payment-status,
+        updated-at: current-block
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (add-supported-currency (currency (string-ascii 10)) (exchange-rate uint))
+  (let (
+    (current-currencies (var-get supported-currencies))
+  )
+    (asserts! (is-contract-owner) err-owner-only)
+    (asserts! (is-valid-currency-string currency) err-invalid-string)
+    (asserts! (> exchange-rate u0) err-invalid-amount)
+    (asserts! (is-none (index-of current-currencies currency)) err-already-exists)
+    
+    (var-set supported-currencies (unwrap! (as-max-len? (append current-currencies currency) u10) err-invalid-amount))
+    (map-set currency-rates currency exchange-rate)
+    (ok true)
+  )
+)
+
+(define-public (update-currency-rate (currency (string-ascii 10)) (new-rate uint))
+  (begin
+    (asserts! (is-contract-owner) err-owner-only)
+    (asserts! (is-supported-currency currency) err-currency-not-supported)
+    (asserts! (> new-rate u0) err-invalid-amount)
+    
+    (map-set currency-rates currency new-rate)
     (ok true)
   )
 )
