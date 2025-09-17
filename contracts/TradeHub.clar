@@ -1,6 +1,6 @@
 ;; TradeHub - Wholesale and Retail Distribution Management System
 ;; A comprehensive contract for managing wholesale/retail operations with supplier networks
-;; SECURITY-HARDENED VERSION WITH MULTI-CURRENCY SUPPORT
+;; SECURITY-HARDENED VERSION WITH MULTI-CURRENCY SUPPORT AND AUTOMATED ESCROW
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -22,11 +22,20 @@
 (define-constant err-invalid-currency (err u115))
 (define-constant err-currency-not-supported (err u116))
 (define-constant err-payment-failed (err u117))
+(define-constant err-escrow-not-found (err u118))
+(define-constant err-escrow-already-released (err u119))
+(define-constant err-invalid-escrow-status (err u120))
+(define-constant err-escrow-expired (err u121))
+(define-constant err-escrow-not-expired (err u122))
 
 ;; Currency Constants
 (define-constant currency-stx "STX")
 (define-constant currency-usdc "USDC")
 (define-constant currency-usdt "USDT")
+
+;; Escrow Constants
+(define-constant escrow-timeout-blocks u1008) ;; ~7 days (assuming 10 min blocks)
+(define-constant dispute-timeout-blocks u144)  ;; ~1 day for dispute resolution
 
 ;; Security Constants
 (define-constant max-string-length u100)
@@ -39,6 +48,7 @@
 ;; Data Variables
 (define-data-var contract-active bool true)
 (define-data-var order-counter uint u0)
+(define-data-var escrow-counter uint u0)
 (define-data-var total-revenue uint u0)
 
 ;; Currency Support Variables
@@ -101,7 +111,25 @@
     created-at: uint,
     updated-at: uint,
     currency: (string-ascii 10),
-    payment-status: (string-ascii 20)
+    payment-status: (string-ascii 20),
+    escrow-id: (optional uint)
+  }
+)
+
+(define-map escrows
+  uint
+  {
+    order-id: uint,
+    buyer: principal,
+    seller: principal,
+    amount: uint,
+    currency: (string-ascii 10),
+    status: (string-ascii 20),
+    created-at: uint,
+    expires-at: uint,
+    released-at: (optional uint),
+    dispute-raised: bool,
+    dispute-deadline: (optional uint)
   }
 )
 
@@ -112,6 +140,9 @@
 
 ;; Currency balances for escrow
 (define-map escrow-balances {user: principal, currency: (string-ascii 10)} uint)
+
+;; Escrow token holdings (actual funds held)
+(define-map escrow-holdings {escrow-id: uint} uint)
 
 ;; Read-only functions
 (define-read-only (get-supplier (supplier principal))
@@ -136,9 +167,29 @@
   )
 )
 
+(define-read-only (get-escrow (escrow-id uint))
+  (if (is-valid-escrow-id escrow-id)
+    (map-get? escrows escrow-id)
+    none
+  )
+)
+
+(define-read-only (get-escrow-by-order (order-id uint))
+  (match (get-order order-id)
+    order-data
+    (match (get escrow-id order-data)
+      escrow-id-val
+      (get-escrow escrow-id-val)
+      none
+    )
+    none
+  )
+)
+
 (define-read-only (get-contract-stats)
   {
     total-orders: (var-get order-counter),
+    total-escrows: (var-get escrow-counter),
     total-revenue: (var-get total-revenue),
     is-active: (var-get contract-active),
     supported-currencies: (var-get supported-currencies)
@@ -180,6 +231,26 @@
   )
 )
 
+(define-read-only (is-escrow-expired (escrow-id uint))
+  (match (get-escrow escrow-id)
+    escrow-data
+    (>= stacks-block-height (get expires-at escrow-data))
+    false
+  )
+)
+
+(define-read-only (is-dispute-expired (escrow-id uint))
+  (match (get-escrow escrow-id)
+    escrow-data
+    (match (get dispute-deadline escrow-data)
+      deadline
+      (>= stacks-block-height deadline)
+      false
+    )
+    false
+  )
+)
+
 ;; SECURITY: Enhanced validation functions
 (define-private (is-contract-owner)
   (is-eq tx-sender contract-owner)
@@ -203,6 +274,16 @@
 
 (define-private (is-valid-payment-status (status (string-ascii 20)))
   (or (is-eq status "pending") (or (is-eq status "paid") (or (is-eq status "failed") (is-eq status "refunded"))))
+)
+
+(define-private (is-valid-escrow-status (status (string-ascii 20)))
+  (or (is-eq status "active") 
+    (or (is-eq status "released") 
+      (or (is-eq status "disputed") 
+        (or (is-eq status "resolved") (is-eq status "expired"))
+      )
+    )
+  )
 )
 
 (define-private (is-supported-currency (currency (string-ascii 10)))
@@ -242,6 +323,10 @@
 
 (define-private (is-valid-order-id (order-id uint))
   (and (> order-id u0) (<= order-id u1000000))
+)
+
+(define-private (is-valid-escrow-id (escrow-id uint))
+  (and (> escrow-id u0) (<= escrow-id u1000000))
 )
 
 ;; SECURITY: Principal validation
@@ -304,6 +389,45 @@
 
 (define-private (check-currency-validity (currency (string-ascii 10)) (acc bool))
   (and acc (is-supported-currency currency))
+)
+
+;; Escrow helper functions
+(define-private (create-escrow (order-id uint) (buyer principal) (seller principal) (amount uint) (currency (string-ascii 10)))
+  (let (
+    (current-block stacks-block-height)
+    (escrow-id (+ (var-get escrow-counter) u1))
+    (expires-at (+ current-block escrow-timeout-blocks))
+  )
+    (map-set escrows escrow-id {
+      order-id: order-id,
+      buyer: buyer,
+      seller: seller,
+      amount: amount,
+      currency: currency,
+      status: "active",
+      created-at: current-block,
+      expires-at: expires-at,
+      released-at: none,
+      dispute-raised: false,
+      dispute-deadline: none
+    })
+    (var-set escrow-counter escrow-id)
+    escrow-id
+  )
+)
+
+(define-private (update-escrow-balance (user principal) (currency (string-ascii 10)) (amount uint) (is-credit bool))
+  (let (
+    (current-balance (get-escrow-balance user currency))
+    (new-balance (if is-credit 
+                   (+ current-balance amount)
+                   (if (>= current-balance amount)
+                     (- current-balance amount)
+                     u0)))
+  )
+    (map-set escrow-balances {user: user, currency: currency} new-balance)
+    new-balance
+  )
 )
 
 ;; SECURITY: Enhanced public functions with comprehensive validation
@@ -447,6 +571,7 @@
                    discounted-price
                    (convert-currency discounted-price product-currency payment-currency)))
     (available-quantity (get quantity product-data))
+    (escrow-id (create-escrow current-order-id tx-sender supplier final-price payment-currency))
   )
     (asserts! (is-contract-active) err-contract-paused)
     (asserts! (is-valid-principal supplier) err-invalid-principal)
@@ -466,7 +591,8 @@
       created-at: current-block,
       updated-at: current-block,
       currency: payment-currency,
-      payment-status: "pending"
+      payment-status: "pending",
+      escrow-id: (some escrow-id)
     })
     
     (map-set products {supplier: supplier, product-id: product-id}
@@ -475,10 +601,173 @@
       })
     )
     
+    ;; Update escrow balance for buyer (debit)
+    (update-escrow-balance tx-sender payment-currency final-price false)
+    
     (update-retailer-stats tx-sender final-price)
     (var-set order-counter current-order-id)
     (var-set total-revenue (+ (var-get total-revenue) final-price))
     (ok current-order-id)
+  )
+)
+
+(define-public (deposit-to-escrow (currency (string-ascii 10)) (amount uint))
+  (begin
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-supported-currency currency) err-currency-not-supported)
+    (asserts! (is-valid-price amount) err-invalid-amount)
+    
+    ;; In production, this would transfer actual tokens to the contract
+    ;; For now, we track balances
+    (update-escrow-balance tx-sender currency amount true)
+    (ok true)
+  )
+)
+
+(define-public (release-escrow (escrow-id uint))
+  (let (
+    (current-block stacks-block-height)
+    (escrow-data (unwrap! (map-get? escrows escrow-id) err-escrow-not-found))
+    (order-data (unwrap! (map-get? orders (get order-id escrow-data)) err-not-found))
+    (buyer (get buyer escrow-data))
+    (seller (get seller escrow-data))
+    (amount (get amount escrow-data))
+    (currency (get currency escrow-data))
+    (escrow-status (get status escrow-data))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-valid-escrow-id escrow-id) err-escrow-not-found)
+    (asserts! (is-eq escrow-status "active") err-invalid-escrow-status)
+    (asserts! (or (is-eq tx-sender buyer) (is-eq tx-sender seller)) err-unauthorized)
+    (asserts! (not (is-escrow-expired escrow-id)) err-escrow-expired)
+    
+    ;; Release funds to seller
+    (update-escrow-balance seller currency amount true)
+    
+    ;; Update escrow status
+    (map-set escrows escrow-id
+      (merge escrow-data {
+        status: "released",
+        released-at: (some current-block)
+      })
+    )
+    
+    ;; Update order payment status
+    (map-set orders (get order-id escrow-data)
+      (merge order-data {
+        payment-status: "paid",
+        updated-at: current-block
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (dispute-escrow (escrow-id uint))
+  (let (
+    (current-block stacks-block-height)
+    (escrow-data (unwrap! (map-get? escrows escrow-id) err-escrow-not-found))
+    (buyer (get buyer escrow-data))
+    (seller (get seller escrow-data))
+    (escrow-status (get status escrow-data))
+    (dispute-deadline (+ current-block dispute-timeout-blocks))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-valid-escrow-id escrow-id) err-escrow-not-found)
+    (asserts! (is-eq escrow-status "active") err-invalid-escrow-status)
+    (asserts! (or (is-eq tx-sender buyer) (is-eq tx-sender seller)) err-unauthorized)
+    (asserts! (not (is-escrow-expired escrow-id)) err-escrow-expired)
+    (asserts! (not (get dispute-raised escrow-data)) err-already-exists)
+    
+    (map-set escrows escrow-id
+      (merge escrow-data {
+        status: "disputed",
+        dispute-raised: true,
+        dispute-deadline: (some dispute-deadline)
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (resolve-dispute (escrow-id uint) (release-to-seller bool))
+  (let (
+    (current-block stacks-block-height)
+    (escrow-data (unwrap! (map-get? escrows escrow-id) err-escrow-not-found))
+    (order-data (unwrap! (map-get? orders (get order-id escrow-data)) err-not-found))
+    (buyer (get buyer escrow-data))
+    (seller (get seller escrow-data))
+    (amount (get amount escrow-data))
+    (currency (get currency escrow-data))
+    (escrow-status (get status escrow-data))
+    (recipient (if release-to-seller seller buyer))
+    (payment-status (if release-to-seller "paid" "refunded"))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-contract-owner) err-owner-only)
+    (asserts! (is-valid-escrow-id escrow-id) err-escrow-not-found)
+    (asserts! (is-eq escrow-status "disputed") err-invalid-escrow-status)
+    
+    ;; Release funds to chosen recipient
+    (update-escrow-balance recipient currency amount true)
+    
+    ;; Update escrow status
+    (map-set escrows escrow-id
+      (merge escrow-data {
+        status: "resolved",
+        released-at: (some current-block)
+      })
+    )
+    
+    ;; Update order payment status
+    (map-set orders (get order-id escrow-data)
+      (merge order-data {
+        payment-status: payment-status,
+        updated-at: current-block
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (handle-expired-escrow (escrow-id uint))
+  (let (
+    (current-block stacks-block-height)
+    (escrow-data (unwrap! (map-get? escrows escrow-id) err-escrow-not-found))
+    (order-data (unwrap! (map-get? orders (get order-id escrow-data)) err-not-found))
+    (buyer (get buyer escrow-data))
+    (amount (get amount escrow-data))
+    (currency (get currency escrow-data))
+    (escrow-status (get status escrow-data))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-valid-escrow-id escrow-id) err-escrow-not-found)
+    (asserts! (is-eq escrow-status "active") err-invalid-escrow-status)
+    (asserts! (is-escrow-expired escrow-id) err-escrow-not-expired)
+    
+    ;; Return funds to buyer for expired escrow
+    (update-escrow-balance buyer currency amount true)
+    
+    ;; Update escrow status
+    (map-set escrows escrow-id
+      (merge escrow-data {
+        status: "expired",
+        released-at: (some current-block)
+      })
+    )
+    
+    ;; Update order payment status
+    (map-set orders (get order-id escrow-data)
+      (merge order-data {
+        payment-status: "refunded",
+        updated-at: current-block
+      })
+    )
+    
+    (ok true)
   )
 )
 
