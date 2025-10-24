@@ -1,6 +1,6 @@
 ;; TradeHub - Wholesale and Retail Distribution Management System
 ;; A comprehensive contract for managing wholesale/retail operations with supplier networks
-;; SECURITY-HARDENED VERSION WITH MULTI-CURRENCY SUPPORT AND AUTOMATED ESCROW
+;; SECURITY-HARDENED VERSION WITH MULTI-CURRENCY SUPPORT, AUTOMATED ESCROW, AND LOYALTY REWARDS
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -27,6 +27,11 @@
 (define-constant err-invalid-escrow-status (err u120))
 (define-constant err-escrow-expired (err u121))
 (define-constant err-escrow-not-expired (err u122))
+(define-constant err-insufficient-points (err u123))
+(define-constant err-invalid-points (err u124))
+(define-constant err-transfer-failed (err u125))
+(define-constant err-points-expired (err u126))
+(define-constant err-invalid-threshold (err u127))
 
 ;; Currency Constants
 (define-constant currency-stx "STX")
@@ -37,6 +42,14 @@
 (define-constant escrow-timeout-blocks u1008) ;; ~7 days (assuming 10 min blocks)
 (define-constant dispute-timeout-blocks u144)  ;; ~1 day for dispute resolution
 
+;; Loyalty Constants
+(define-constant points-per-currency-unit u10) ;; Default: 10 points per unit spent
+(define-constant points-to-discount-rate u100) ;; 100 points = 1 unit discount
+(define-constant bronze-threshold u0)
+(define-constant silver-threshold u1000)
+(define-constant gold-threshold u5000)
+(define-constant points-expiry-blocks u144000) ;; ~1000 days
+
 ;; Security Constants
 (define-constant max-string-length u100)
 (define-constant max-description-length u500)
@@ -44,15 +57,24 @@
 (define-constant max-quantity u1000000)
 (define-constant max-rating u5)
 (define-constant min-rating u1)
+(define-constant max-points u1000000000)
 
 ;; Data Variables
 (define-data-var contract-active bool true)
 (define-data-var order-counter uint u0)
 (define-data-var escrow-counter uint u0)
 (define-data-var total-revenue uint u0)
+(define-data-var points-transaction-counter uint u0)
 
 ;; Currency Support Variables
 (define-data-var supported-currencies (list 10 (string-ascii 10)) (list "STX" "USDC" "USDT"))
+
+;; Loyalty Configuration
+(define-data-var loyalty-enabled bool true)
+(define-data-var points-earn-rate uint points-per-currency-unit)
+(define-data-var points-redemption-rate uint points-to-discount-rate)
+(define-data-var points-expiry-enabled bool false)
+(define-data-var points-expiry-period uint points-expiry-blocks)
 
 ;; Data Maps
 (define-map suppliers
@@ -112,7 +134,8 @@
     updated-at: uint,
     currency: (string-ascii 10),
     payment-status: (string-ascii 20),
-    escrow-id: (optional uint)
+    escrow-id: (optional uint),
+    points-earned: uint
   }
 )
 
@@ -130,6 +153,33 @@
     released-at: (optional uint),
     dispute-raised: bool,
     dispute-deadline: (optional uint)
+  }
+)
+
+(define-map loyalty-points
+  principal
+  {
+    total-points: uint,
+    available-points: uint,
+    redeemed-points: uint,
+    expired-points: uint,
+    lifetime-earned: uint,
+    current-tier: (string-ascii 20),
+    last-activity: uint,
+    tier-upgraded-at: uint
+  }
+)
+
+(define-map points-transactions
+  uint
+  {
+    retailer: principal,
+    transaction-type: (string-ascii 20),
+    points: uint,
+    order-id: (optional uint),
+    created-at: uint,
+    expires-at: (optional uint),
+    description: (string-ascii 100)
   }
 )
 
@@ -186,13 +236,70 @@
   )
 )
 
+(define-read-only (get-loyalty-points (retailer principal))
+  (map-get? loyalty-points retailer)
+)
+
+(define-read-only (get-points-balance (retailer principal))
+  (match (get-loyalty-points retailer)
+    loyalty-data
+    (ok (get available-points loyalty-data))
+    (ok u0)
+  )
+)
+
+(define-read-only (get-points-transaction (transaction-id uint))
+  (map-get? points-transactions transaction-id)
+)
+
+(define-read-only (get-loyalty-config)
+  {
+    enabled: (var-get loyalty-enabled),
+    earn-rate: (var-get points-earn-rate),
+    redemption-rate: (var-get points-redemption-rate),
+    expiry-enabled: (var-get points-expiry-enabled),
+    expiry-period: (var-get points-expiry-period),
+    bronze-threshold: bronze-threshold,
+    silver-threshold: silver-threshold,
+    gold-threshold: gold-threshold
+  }
+)
+
+(define-read-only (get-redeemable-discount (points uint))
+  (if (and (> points u0) (<= points max-points))
+    (ok (/ points (var-get points-redemption-rate)))
+    (ok u0)
+  )
+)
+
+(define-read-only (get-points-to-next-tier (retailer principal))
+  (match (get-loyalty-points retailer)
+    loyalty-data
+    (let (
+      (current-points (get total-points loyalty-data))
+      (current-tier (get current-tier loyalty-data))
+    )
+      (if (is-eq current-tier "bronze")
+        (ok (if (>= current-points silver-threshold) u0 (- silver-threshold current-points)))
+        (if (is-eq current-tier "silver")
+          (ok (if (>= current-points gold-threshold) u0 (- gold-threshold current-points)))
+          (ok u0)
+        )
+      )
+    )
+    (ok silver-threshold)
+  )
+)
+
 (define-read-only (get-contract-stats)
   {
     total-orders: (var-get order-counter),
     total-escrows: (var-get escrow-counter),
     total-revenue: (var-get total-revenue),
     is-active: (var-get contract-active),
-    supported-currencies: (var-get supported-currencies)
+    supported-currencies: (var-get supported-currencies),
+    total-points-transactions: (var-get points-transaction-counter),
+    loyalty-enabled: (var-get loyalty-enabled)
   }
 )
 
@@ -286,6 +393,18 @@
   )
 )
 
+(define-private (is-valid-transaction-type (tx-type (string-ascii 20)))
+  (or (is-eq tx-type "earned") 
+    (or (is-eq tx-type "redeemed") 
+      (or (is-eq tx-type "transferred-in") 
+        (or (is-eq tx-type "transferred-out") 
+          (or (is-eq tx-type "expired") (is-eq tx-type "bonus"))
+        )
+      )
+    )
+  )
+)
+
 (define-private (is-supported-currency (currency (string-ascii 10)))
   (is-some (index-of (var-get supported-currencies) currency))
 )
@@ -316,6 +435,10 @@
   (and (>= rating min-rating) (<= rating max-rating))
 )
 
+(define-private (is-valid-points (points uint))
+  (and (> points u0) (<= points max-points))
+)
+
 ;; SECURITY: ID validation functions
 (define-private (is-valid-product-id (product-id uint))
   (and (> product-id u0) (<= product-id u1000000))
@@ -327,6 +450,10 @@
 
 (define-private (is-valid-escrow-id (escrow-id uint))
   (and (> escrow-id u0) (<= escrow-id u1000000))
+)
+
+(define-private (is-valid-transaction-id (tx-id uint))
+  (and (> tx-id u0) (<= tx-id u10000000))
 )
 
 ;; SECURITY: Principal validation
@@ -430,6 +557,148 @@
   )
 )
 
+;; Loyalty Points Helper Functions
+(define-private (initialize-loyalty-account (retailer principal))
+  (let (
+    (current-block stacks-block-height)
+  )
+    (map-set loyalty-points retailer {
+      total-points: u0,
+      available-points: u0,
+      redeemed-points: u0,
+      expired-points: u0,
+      lifetime-earned: u0,
+      current-tier: "bronze",
+      last-activity: current-block,
+      tier-upgraded-at: current-block
+    })
+    true
+  )
+)
+
+(define-private (calculate-points-earned (amount uint))
+  (let (
+    (earn-rate (var-get points-earn-rate))
+  )
+    (if (and (> amount u0) (> earn-rate u0))
+      (/ (* amount earn-rate) u100)
+      u0
+    )
+  )
+)
+
+(define-private (get-tier-from-points (total-points uint))
+  (if (>= total-points gold-threshold)
+    "gold"
+    (if (>= total-points silver-threshold)
+      "silver"
+      "bronze"
+    )
+  )
+)
+
+(define-private (record-points-transaction 
+  (retailer principal) 
+  (tx-type (string-ascii 20)) 
+  (points uint) 
+  (order-id-opt (optional uint))
+  (description (string-ascii 100))
+)
+  (let (
+    (current-block stacks-block-height)
+    (tx-id (+ (var-get points-transaction-counter) u1))
+    (expires-at (if (var-get points-expiry-enabled)
+                  (some (+ current-block (var-get points-expiry-period)))
+                  none))
+  )
+    (map-set points-transactions tx-id {
+      retailer: retailer,
+      transaction-type: tx-type,
+      points: points,
+      order-id: order-id-opt,
+      created-at: current-block,
+      expires-at: expires-at,
+      description: description
+    })
+    (var-set points-transaction-counter tx-id)
+    tx-id
+  )
+)
+
+(define-private (update-loyalty-account 
+  (retailer principal) 
+  (points-change int) 
+  (tx-type (string-ascii 20))
+)
+  (let (
+    (current-block stacks-block-height)
+    (loyalty-data (default-to 
+      {
+        total-points: u0,
+        available-points: u0,
+        redeemed-points: u0,
+        expired-points: u0,
+        lifetime-earned: u0,
+        current-tier: "bronze",
+        last-activity: current-block,
+        tier-upgraded-at: current-block
+      }
+      (map-get? loyalty-points retailer)
+    ))
+    (current-available (get available-points loyalty-data))
+    (current-total (get total-points loyalty-data))
+  )
+    (if (>= points-change 0)
+      ;; Adding points
+      (let (
+        (points-to-add (to-uint points-change))
+        (new-available (+ current-available points-to-add))
+        (new-total (+ current-total points-to-add))
+        (new-lifetime (+ (get lifetime-earned loyalty-data) points-to-add))
+        (new-tier (get-tier-from-points new-total))
+      )
+        (map-set loyalty-points retailer
+          (merge loyalty-data {
+            total-points: new-total,
+            available-points: new-available,
+            lifetime-earned: new-lifetime,
+            current-tier: new-tier,
+            last-activity: current-block
+          })
+        )
+        true
+      )
+      ;; Subtracting points
+      (let (
+        (points-to-subtract (if (< points-change 0) (to-uint (* points-change -1)) u0))
+      )
+        (if (>= current-available points-to-subtract)
+          (let (
+            (new-available (- current-available points-to-subtract))
+            (new-redeemed (if (is-eq tx-type "redeemed")
+                           (+ (get redeemed-points loyalty-data) points-to-subtract)
+                           (get redeemed-points loyalty-data)))
+            (new-expired (if (is-eq tx-type "expired")
+                          (+ (get expired-points loyalty-data) points-to-subtract)
+                          (get expired-points loyalty-data)))
+          )
+            (map-set loyalty-points retailer
+              (merge loyalty-data {
+                available-points: new-available,
+                redeemed-points: new-redeemed,
+                expired-points: new-expired,
+                last-activity: current-block
+              })
+            )
+            true
+          )
+          false
+        )
+      )
+    )
+  )
+)
+
 ;; SECURITY: Enhanced public functions with comprehensive validation
 (define-public (register-supplier 
   (name (string-ascii 50)) 
@@ -493,6 +762,8 @@
         joined-at: current-block,
         preferred-currency: preferred-currency
       })
+      ;; Initialize loyalty account
+      (initialize-loyalty-account tx-sender)
       (ok true)
     )
   )
@@ -572,6 +843,7 @@
                    (convert-currency discounted-price product-currency payment-currency)))
     (available-quantity (get quantity product-data))
     (escrow-id (create-escrow current-order-id tx-sender supplier final-price payment-currency))
+    (points-earned (if (var-get loyalty-enabled) (calculate-points-earned final-price) u0))
   )
     (asserts! (is-contract-active) err-contract-paused)
     (asserts! (is-valid-principal supplier) err-invalid-principal)
@@ -592,7 +864,8 @@
       updated-at: current-block,
       currency: payment-currency,
       payment-status: "pending",
-      escrow-id: (some escrow-id)
+      escrow-id: (some escrow-id),
+      points-earned: points-earned
     })
     
     (map-set products {supplier: supplier, product-id: product-id}
@@ -604,10 +877,171 @@
     ;; Update escrow balance for buyer (debit)
     (update-escrow-balance tx-sender payment-currency final-price false)
     
+    ;; Award loyalty points if enabled
+    (if (and (var-get loyalty-enabled) (> points-earned u0))
+      (begin
+        (update-loyalty-account tx-sender (to-int points-earned) "earned")
+        (record-points-transaction tx-sender "earned" points-earned (some current-order-id) "Points earned from purchase")
+        true
+      )
+      true
+    )
+    
+    ;; Check for tier upgrade
+    (try! (check-and-upgrade-tier tx-sender))
+    
     (update-retailer-stats tx-sender final-price)
     (var-set order-counter current-order-id)
     (var-set total-revenue (+ (var-get total-revenue) final-price))
     (ok current-order-id)
+  )
+)
+
+(define-public (redeem-points (points uint) (order-id uint))
+  (let (
+    (current-block stacks-block-height)
+    (order-data (unwrap! (map-get? orders order-id) err-not-found))
+    (retailer (get retailer order-data))
+    (loyalty-data (unwrap! (map-get? loyalty-points retailer) err-not-found))
+    (available-points (get available-points loyalty-data))
+    (discount-amount-result (unwrap-panic (get-redeemable-discount points)))
+    (order-price (get total-price order-data))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-eq tx-sender retailer) err-unauthorized)
+    (asserts! (is-valid-points points) err-invalid-points)
+    (asserts! (>= available-points points) err-insufficient-points)
+    (asserts! (is-eq (get payment-status order-data) "pending") err-invalid-status)
+    (asserts! (<= discount-amount-result order-price) err-invalid-amount)
+    
+    ;; Deduct points
+    (asserts! (update-loyalty-account retailer (- 0 (to-int points)) "redeemed") err-transfer-failed)
+    
+    ;; Record transaction
+    (record-points-transaction retailer "redeemed" points (some order-id) "Points redeemed for discount")
+    
+    ;; Update order with discount
+    (let (
+      (new-price (- order-price discount-amount-result))
+    )
+      (map-set orders order-id
+        (merge order-data {
+          total-price: new-price,
+          updated-at: current-block
+        })
+      )
+      (ok new-price)
+    )
+  )
+)
+
+(define-public (transfer-points (recipient principal) (points uint))
+  (let (
+    (sender-loyalty (unwrap! (map-get? loyalty-points tx-sender) err-not-found))
+    (sender-available (get available-points sender-loyalty))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-valid-principal recipient) err-invalid-principal)
+    (asserts! (is-valid-points points) err-invalid-points)
+    (asserts! (>= sender-available points) err-insufficient-points)
+    (asserts! (not (is-eq tx-sender recipient)) err-invalid-principal)
+    (asserts! (is-some (map-get? retailers recipient)) err-not-found)
+    
+    ;; Deduct from sender
+    (asserts! (update-loyalty-account tx-sender (- 0 (to-int points)) "transferred-out") err-transfer-failed)
+    
+    ;; Add to recipient
+    (asserts! (update-loyalty-account recipient (to-int points) "transferred-in") err-transfer-failed)
+    
+    ;; Record transactions
+    (record-points-transaction tx-sender "transferred-out" points none "Points transferred out")
+    (record-points-transaction recipient "transferred-in" points none "Points transferred in")
+    
+    (ok true)
+  )
+)
+
+(define-public (check-and-upgrade-tier (retailer principal))
+  (let (
+    (current-block stacks-block-height)
+    (loyalty-data (unwrap! (map-get? loyalty-points retailer) err-not-found))
+    (retailer-data (unwrap! (map-get? retailers retailer) err-not-found))
+    (total-points (get total-points loyalty-data))
+    (current-tier (get current-tier loyalty-data))
+    (new-tier (get-tier-from-points total-points))
+  )
+    (asserts! (is-contract-active) err-contract-paused)
+    
+    (if (not (is-eq current-tier new-tier))
+      (let (
+        (new-discount-rate (if (is-eq new-tier "bronze") u5 
+                            (if (is-eq new-tier "silver") u10 
+                              (if (is-eq new-tier "gold") u15 u0))))
+      )
+        ;; Update loyalty tier
+        (map-set loyalty-points retailer
+          (merge loyalty-data {
+            current-tier: new-tier,
+            tier-upgraded-at: current-block
+          })
+        )
+        
+        ;; Update retailer tier and discount
+        (map-set retailers retailer
+          (merge retailer-data {
+            tier: new-tier,
+            discount-rate: new-discount-rate
+          })
+        )
+        (ok true)
+      )
+      (ok false)
+    )
+  )
+)
+
+(define-public (award-bonus-points (retailer principal) (points uint) (description (string-ascii 100)))
+  (begin
+    (asserts! (is-contract-owner) err-owner-only)
+    (asserts! (is-contract-active) err-contract-paused)
+    (asserts! (is-valid-principal retailer) err-invalid-principal)
+    (asserts! (is-valid-points points) err-invalid-points)
+    (asserts! (> (len description) u0) err-invalid-string)
+    (asserts! (is-some (map-get? retailers retailer)) err-not-found)
+    
+    ;; Award points
+    (asserts! (update-loyalty-account retailer (to-int points) "bonus") err-transfer-failed)
+    
+    ;; Record transaction
+    (record-points-transaction retailer "bonus" points none description)
+    
+    ;; Check for tier upgrade
+    (try! (check-and-upgrade-tier retailer))
+    
+    (ok true)
+  )
+)
+
+(define-public (configure-loyalty-program 
+  (enabled bool)
+  (earn-rate uint)
+  (redemption-rate uint)
+  (expiry-enabled bool)
+  (expiry-period uint)
+)
+  (begin
+    (asserts! (is-contract-owner) err-owner-only)
+    (asserts! (> earn-rate u0) err-invalid-amount)
+    (asserts! (> redemption-rate u0) err-invalid-amount)
+    (asserts! (> expiry-period u0) err-invalid-amount)
+    
+    (var-set loyalty-enabled enabled)
+    (var-set points-earn-rate earn-rate)
+    (var-set points-redemption-rate redemption-rate)
+    (var-set points-expiry-enabled expiry-enabled)
+    (var-set points-expiry-period expiry-period)
+    
+    (ok true)
   )
 )
 

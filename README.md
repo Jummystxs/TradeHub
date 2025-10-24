@@ -1,10 +1,10 @@
 # TradeHub
 
-> A comprehensive wholesale and retail distribution management system built on Stacks blockchain with multi-currency support and automated escrow
+> A comprehensive wholesale and retail distribution management system built on Stacks blockchain with multi-currency support, automated escrow, and tokenized loyalty rewards
 
 ## Overview
 
-TradeHub revolutionizes wholesale and retail operations by providing a transparent, secure, and efficient platform for suppliers and retailers to connect, manage inventory, and process orders. Built with Clarity smart contracts, it ensures trust and automation in the supply chain with support for multiple cryptocurrencies, stablecoins, and automated escrow for secure payment processing.
+TradeHub revolutionizes wholesale and retail operations by providing a transparent, secure, and efficient platform for suppliers and retailers to connect, manage inventory, and process orders. Built with Clarity smart contracts, it ensures trust and automation in the supply chain with support for multiple cryptocurrencies, stablecoins, automated escrow for secure payment processing, and a comprehensive loyalty rewards program to incentivize frequent retailers.
 
 ## Features
 
@@ -25,10 +25,15 @@ TradeHub revolutionizes wholesale and retail operations by providing a transpare
 - **Status Tracking**: Real-time order status from placement to delivery
 - **Multi-Currency Payments**: Pay in preferred cryptocurrency or stablecoin
 - **Payment Security**: Automated escrow protection for all transactions
+- **Loyalty Rewards**: Earn tokenized points on every purchase
+- **Points Redemption**: Convert points to discounts on future orders
+- **Automatic Tier Upgrades**: Progress through tiers based on accumulated points
+- **Points Transfer**: Transfer points to other retailers
 
 ### Core Functionality
 - **Multi-Currency Support**: Native support for STX, USDC, USDT with automatic conversion
 - **Automated Escrow System**: Secure payment processing with dispute resolution
+- **Loyalty Rewards Program**: Tokenized points system with earning, redemption, and transfer
 - **Multi-party Transactions**: Secure interactions between suppliers and retailers
 - **Automated Pricing**: Dynamic pricing with tier-based discounts and currency conversion
 - **Inventory Management**: Real-time stock updates and availability tracking
@@ -36,6 +41,44 @@ TradeHub revolutionizes wholesale and retail operations by providing a transpare
 - **Analytics Dashboard**: Revenue tracking and performance metrics across currencies
 - **Exchange Rate Management**: Real-time currency conversion with oracle integration ready
 - **Dispute Resolution**: Built-in dispute handling with timeout mechanisms
+- **Tier Progression**: Automatic tier upgrades based on loyalty points
+
+## Loyalty Rewards Program
+
+### Key Features
+- **Points Earning**: Retailers automatically earn points on every purchase
+- **Configurable Rates**: Owner-controlled earning and redemption rates
+- **Points Redemption**: Convert points to discounts on orders
+- **Tier Progression**: Automatic tier upgrades based on accumulated points
+- **Points Transfer**: Transfer points between retailers
+- **Bonus Points**: Promotional events and special point awards
+- **Points Expiration**: Optional expiration system with configurable timeframes
+- **Transaction History**: Complete audit trail of all points activities
+
+### Earning Points
+- Points are automatically awarded when orders are placed
+- Default: 10 points earned per currency unit spent (configurable)
+- Points accumulate in retailer's loyalty account
+- All points transactions are recorded with timestamps
+
+### Redeeming Points
+- Convert points to discount on order payments
+- Default: 100 points = 1 unit discount (configurable)
+- Points are deducted from available balance
+- Redemption recorded in transaction history
+
+### Tier Progression
+- **Bronze Tier**: 0+ points, 5% discount
+- **Silver Tier**: 1,000+ points, 10% discount
+- **Gold Tier**: 5,000+ points, 15% discount
+- Automatic tier upgrades based on total accumulated points
+- Tier upgrades increase discount rates on all future orders
+
+### Points Management
+- **Transfer Points**: Share points with other retailers
+- **Bonus Points**: Contract owner can award promotional points
+- **Expiration**: Optional points expiration with configurable timeframe
+- **Balance Tracking**: Real-time visibility of available, redeemed, and expired points
 
 ## Automated Escrow System
 
@@ -88,12 +131,14 @@ TradeHub revolutionizes wholesale and retail operations by providing a transpare
 
 ### Smart Contract Architecture
 ```clarity
-;; Core entities with multi-currency support and escrow
+;; Core entities with multi-currency support, escrow, and loyalty
 - Suppliers: Business registration, product management, and currency preferences
 - Retailers: Tiered membership with discount benefits and currency preferences
 - Products: Comprehensive catalog with pricing, inventory, and currency selection
 - Orders: Complete order lifecycle management with multi-currency payment tracking
 - Escrows: Automated escrow system for secure payment processing
+- Loyalty Points: Tokenized rewards with earning, redemption, and transfer
+- Points Transactions: Complete history of all loyalty activities
 - Currency Management: Exchange rates, conversion, and validation
 ```
 
@@ -101,13 +146,15 @@ TradeHub revolutionizes wholesale and retail operations by providing a transpare
 - **Suppliers**: Name, contact, status, rating, product count, currency preferences
 - **Retailers**: Name, tier, discount rate, order history, preferred currency
 - **Products**: Detailed specs, pricing, inventory, categories, currency
-- **Orders**: Complete transaction records with status, payment tracking, and escrow ID
+- **Orders**: Complete transaction records with status, payment tracking, escrow ID, and points earned
 - **Escrows**: Secure payment holding with status, timeouts, and dispute management
+- **Loyalty Points**: Total points, available points, redeemed points, tier, last activity
+- **Points Transactions**: Type, amount, order reference, timestamps, expiration
 - **Currency Rates**: Exchange rates for automatic conversion
 - **Escrow Balances**: Multi-currency balance management with security
 
 ### Security Features
-- Input validation for all parameters including currency and escrow validation
+- Input validation for all parameters including currency, escrow, and loyalty validation
 - Proper error handling with descriptive error codes
 - Access control with role-based permissions
 - Emergency pause functionality for critical situations
@@ -115,6 +162,7 @@ TradeHub revolutionizes wholesale and retail operations by providing a transpare
 - Payment status tracking and validation
 - Escrow timeout and dispute protection
 - Comprehensive balance management and security
+- Loyalty points transfer validation and fraud prevention
 
 ## Getting Started
 
@@ -124,6 +172,7 @@ TradeHub revolutionizes wholesale and retail operations by providing a transpare
 - Basic understanding of Clarity smart contracts
 - Understanding of multi-currency operations
 - Knowledge of escrow systems
+- Familiarity with loyalty rewards programs
 
 ### Installation
 ```bash
@@ -168,13 +217,51 @@ clarinet test
 )
 ```
 
-#### Place Order with Automatic Escrow Creation
+#### Place Order with Automatic Escrow and Loyalty Points
 ```clarity
 (contract-call? .tradehub place-order 
   'SP1234... 
   u1 
   u100
   "STX"
+)
+;; Automatically creates escrow and awards loyalty points
+```
+
+#### Check Loyalty Points Balance
+```clarity
+(contract-call? .tradehub get-points-balance tx-sender)
+```
+
+#### Redeem Points for Discount
+```clarity
+(contract-call? .tradehub redeem-points u500 u1)
+;; Redeem 500 points for discount on order #1
+```
+
+#### Transfer Points to Another Retailer
+```clarity
+(contract-call? .tradehub transfer-points 'SP5678... u200)
+;; Transfer 200 points to another retailer
+```
+
+#### Award Bonus Points (Owner Only)
+```clarity
+(contract-call? .tradehub award-bonus-points 
+  'SP1234... 
+  u1000 
+  "Holiday promotion bonus"
+)
+```
+
+#### Configure Loyalty Program (Owner Only)
+```clarity
+(contract-call? .tradehub configure-loyalty-program 
+  true    ;; enabled
+  u10     ;; earn rate (10 points per unit)
+  u100    ;; redemption rate (100 points = 1 unit)
+  false   ;; expiry enabled
+  u144000 ;; expiry period in blocks
 )
 ```
 
@@ -220,10 +307,16 @@ The contract includes comprehensive tests for:
 - Product management with multi-currency pricing
 - Order processing with currency conversion and escrow creation
 - Escrow lifecycle management (creation, release, disputes, expiration)
+- Loyalty points earning on purchases
+- Points redemption with discount application
+- Tier progression and automatic upgrades
+- Points transfer between retailers
+- Bonus points awarding
+- Loyalty configuration management
 - Pricing calculations across currencies
 - Currency validation and conversion
 - Dispute resolution and timeout handling
-- Error handling scenarios for currency and escrow operations
+- Error handling scenarios for all operations
 
 ## API Reference
 
@@ -231,11 +324,18 @@ The contract includes comprehensive tests for:
 
 #### Core Functions
 - `register-supplier`: Register a new supplier with currency preferences
-- `register-retailer`: Register a new retailer with preferred currency
+- `register-retailer`: Register a new retailer with preferred currency (auto-enrolls in loyalty)
 - `add-product`: Add product to supplier catalog with currency
-- `place-order`: Place order with automatic escrow creation and currency conversion
+- `place-order`: Place order with automatic escrow creation, currency conversion, and loyalty points
 - `update-order-status`: Update order status (supplier only)
 - `update-payment-status`: Update payment status (supplier only)
+
+#### Loyalty Rewards Functions
+- `redeem-points`: Exchange loyalty points for order discounts
+- `transfer-points`: Transfer points to another retailer
+- `check-and-upgrade-tier`: Process automatic tier upgrades based on points
+- `award-bonus-points`: Award promotional bonus points (owner only)
+- `configure-loyalty-program`: Configure loyalty program settings (owner only)
 
 #### Escrow Management
 - `deposit-to-escrow`: Deposit funds to escrow balance
@@ -259,10 +359,18 @@ The contract includes comprehensive tests for:
 - `get-supplier`: Retrieve supplier information with currency preferences
 - `get-retailer`: Retrieve retailer information with preferred currency
 - `get-product`: Retrieve product details with currency
-- `get-order`: Retrieve order information with payment details
+- `get-order`: Retrieve order information with payment details and points earned
 - `get-escrow`: Retrieve escrow information with status and timeouts
 - `get-escrow-by-order`: Get escrow information for specific order
-- `get-contract-stats`: Get contract statistics including supported currencies and escrow count
+- `get-contract-stats`: Get contract statistics including supported currencies, escrow count, and loyalty transactions
+
+#### Loyalty Functions
+- `get-loyalty-points`: Get complete loyalty data for retailer
+- `get-points-balance`: Get current available points balance
+- `get-points-transaction`: Get specific points transaction details
+- `get-loyalty-config`: View loyalty program configuration
+- `get-redeemable-discount`: Calculate discount amount from points
+- `get-points-to-next-tier`: Calculate points needed for next tier
 
 #### Currency Functions
 - `get-supported-currencies`: List all supported currencies
@@ -306,6 +414,50 @@ The contract includes comprehensive tests for:
 - `u121`: Escrow expired
 - `u122`: Escrow not expired
 
+### Loyalty Rewards Error Codes
+- `u123`: Insufficient points for redemption
+- `u124`: Invalid points amount
+- `u125`: Points transfer failed
+- `u126`: Points expired
+- `u127`: Invalid tier threshold
+
+## Loyalty Rewards Implementation Details
+
+### Points Calculation
+- Points earned = (Order Amount × Earn Rate) / 100
+- Discount from points = Points / Redemption Rate
+- Default earn rate: 10 points per currency unit
+- Default redemption rate: 100 points = 1 unit discount
+
+### Tier Thresholds
+- **Bronze**: 0 - 999 points (5% discount)
+- **Silver**: 1,000 - 4,999 points (10% discount)
+- **Gold**: 5,000+ points (15% discount)
+
+### Points Lifecycle
+1. **Earning**: Points automatically awarded on order placement
+2. **Accumulation**: Points added to available balance
+3. **Redemption**: Points converted to discounts and deducted from balance
+4. **Transfer**: Points moved between retailer accounts
+5. **Expiration**: Optional expiration after configurable period
+6. **Bonus**: Owner can award promotional points
+
+### Transaction Types
+- `earned`: Points earned from purchase
+- `redeemed`: Points used for discount
+- `transferred-in`: Points received from another retailer
+- `transferred-out`: Points sent to another retailer
+- `expired`: Points expired after timeout
+- `bonus`: Promotional bonus points awarded
+
+### Security Features
+- Comprehensive validation of all points operations
+- Balance checking before redemption or transfer
+- Transaction history for complete audit trail
+- Owner-only configuration changes
+- Fraud prevention through transfer validation
+- Proper error handling for all edge cases
+
 ## Escrow Implementation Details
 
 ### Timeout System
@@ -343,15 +495,16 @@ The contract includes comprehensive tests for:
 - Comprehensive validation in all currency-related operations
 - Escrow operations include full currency validation
 
-### Payment Flow with Escrow
+### Payment Flow with Escrow and Loyalty
 1. Retailer places order specifying payment currency
 2. System calculates price in product's native currency
 3. Applies tier-based discount
 4. Converts final price to payment currency if different
 5. Creates escrow with payment amount in chosen currency
-6. Creates order with escrow reference and payment tracking
-7. Funds are held securely until release or dispute resolution
-8. Supplier can track payment status through escrow system
+6. Awards loyalty points based on final price
+7. Creates order with escrow reference and payment tracking
+8. Funds are held securely until release or dispute resolution
+9. Supplier can track payment status through escrow system
 
 ### Escrow Balance Management
 - Multi-currency balance tracking for all users
@@ -365,10 +518,13 @@ The contract includes comprehensive tests for:
 ### Production Deployment
 - Configure initial exchange rates before deployment
 - Set up oracle integration for real-time rates (recommended)
+- Configure loyalty program parameters (earn rate, redemption rate)
+- Set tier thresholds based on business goals
 - Test all currency combinations thoroughly
 - Implement monitoring for exchange rate accuracy
 - Configure escrow timeout periods appropriately
 - Set up dispute resolution procedures
+- Monitor loyalty points issuance and redemption
 
 ### Security Considerations
 - All currency operations include overflow protection
@@ -378,6 +534,9 @@ The contract includes comprehensive tests for:
 - Escrow timeout protection against fund locking
 - Dispute resolution with proper access controls
 - Balance tracking security and validation
+- Loyalty points fraud prevention
+- Points transfer validation
+- Redemption limit checks
 
 ## Future Enhancements
 
@@ -390,6 +549,11 @@ The contract includes comprehensive tests for:
 - DeFi yield farming for idle escrow balances
 - Enhanced dispute resolution with evidence submission
 - Reputation-based escrow terms (shorter timeouts for trusted users)
+- NFT-based loyalty badges for tier achievements
+- Points marketplace for peer-to-peer trading
+- Seasonal loyalty multipliers and campaigns
+- Referral bonus points program
+- Points staking for additional benefits
 
 ### Integration Possibilities
 - DEX integration for automatic currency swapping
@@ -400,37 +564,47 @@ The contract includes comprehensive tests for:
 - Insurance integration for high-value escrows
 - Multi-signature wallets for large transactions
 - Automated arbitration services
+- Gamification elements for loyalty program
+- Social features for points leaderboards
+- Integration with external loyalty networks
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/escrow-enhancement`)
-3. Commit your changes (`git commit -m 'Add partial escrow release functionality'`)
-4. Push to the branch (`git push origin feature/escrow-enhancement`)
+2. Create a feature branch (`git checkout -b feature/loyalty-enhancement`)
+3. Commit your changes (`git commit -m 'Add loyalty points staking'`)
+4. Push to the branch (`git push origin feature/loyalty-enhancement`)
 5. Create a Pull Request
 
 ### Development Guidelines
 - All currency operations must include comprehensive validation
 - Maintain precision in exchange rate calculations
-- Include tests for all currency combinations and escrow scenarios
+- Include tests for all currency combinations, escrow scenarios, and loyalty operations
 - Document any new error codes
 - Follow existing code style and security patterns
 - Test escrow timeout and dispute scenarios thoroughly
-- Ensure proper access control for all escrow functions
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For support and questions:
-- Create an issue in the GitHub repository
-- Join our Discord community
-- Check the documentation wiki
-- Review existing test cases for usage examples
+- Ensure proper access control for all escrow and loyalty functions
+- Validate all loyalty points operations
+- Test tier progression logic thoroughly
 
 ## Changelog
+
+### v4.0.0 - Loyalty Rewards Program
+- **NEW**: Implemented tokenized loyalty rewards system
+- **NEW**: Added points earning on every purchase
+- **NEW**: Built points redemption for order discounts
+- **NEW**: Automatic tier progression based on accumulated points
+- **NEW**: Points transfer functionality between retailers
+- **NEW**: Bonus points system for promotional events
+- **NEW**: Complete points transaction history
+- **NEW**: Configurable loyalty program parameters
+- **NEW**: Points expiration system (optional)
+- **ENHANCED**: Order system now tracks points earned
+- **ENHANCED**: Retailer registration auto-enrolls in loyalty program
+- **ENHANCED**: Tier system now integrates with loyalty points
+- **ADDED**: New error codes for loyalty-related operations
+- **ADDED**: Comprehensive loyalty read-only functions
+- **IMPROVED**: Tier upgrades now automatic based on points
 
 ### v3.0.0 - Automated Escrow System
 - **NEW**: Implemented automated escrow for secure payment processing
